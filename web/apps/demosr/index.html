@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<script type="importmap">{ "imports": { "onnxruntime-web/webgpu": "./ort/ort.webgpu.min.mjs", "onnxruntime-web": "./ort/ort.webgpu.min.mjs" } }</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Gaussifier-SR</title>
+<meta name="description" content="Super-resolution with feed-forward 2D Gaussians, running in the browser with WebGPU." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" />
+</head>
+<body>
+<div id="app">
+  <aside>
+    <div class="brand"><span class="name">Gaussifier-SR</span><span id="gpuPill" class="pill" title="A x2 run of a Kodak image takes well under a second on a discrete GPU, a few seconds on an integrated one, and minutes on a software renderer.">checking gpu</span></div>
+    <section>
+      <div id="imageDrop" title="Pick a low-resolution image">
+        <img id="thumb" alt="" />
+        <div class="meta"><div id="imageName">No image</div><div id="imageDims">Click to pick a low-resolution image</div></div>
+        <input id="image" type="file" accept="image/*" hidden />
+      </div>
+      <div id="samples" role="listbox" aria-label="Kodak sample images" title="Kodak images: the input is the original downscaled with MATLAB bicubic, as in the SR benchmarks, and the original scores the result. One is picked at random when the page opens."></div>
+      <div id="scale" class="seg" role="group" aria-label="Scale" title="x4 runs the x2 model twice."><span>Scale</span><div class="opts"><button type="button" data-scale="2" aria-pressed="true">×2</button><button type="button" data-scale="4" aria-pressed="false">×4</button></div></div>
+      <div id="runStatus" class="muted">Loading the model and the sample image…</div>
+      <div class="muted note">This WebGPU version is slower than the fused CUDA runtime behind the paper's timings.</div>
+    </section>
+    <section id="result">
+      <div class="stats">
+        <div class="stat" title="PSNR of the result against the original, RGB, 8-bit, whole image."><div class="k">PSNR</div><div class="v"><span id="psnr">—</span></div></div>
+        <div class="stat" title="PSNR of the bicubic upscale (MATLAB imresize) against the original."><div class="k">Bicubic</div><div class="v"><span id="psnrBicubic">—</span></div></div>
+        <div class="stat"><div class="k">Gaussians</div><div class="v" id="statN">—</div></div>
+        <div class="stat"><div class="k">Time</div><div class="v" id="time">—</div></div>
+      </div>
+      <div id="compare" class="seg" role="group" aria-label="Left side of the comparison" title="What the left side of the divider shows; the right side is the Gaussifier-SR result."><span>Compare</span><div class="opts"><button type="button" data-compare="bicubic" aria-pressed="true">Bicubic</button><button type="button" data-compare="original" aria-pressed="false">Original</button><button type="button" data-compare="input" aria-pressed="false">Input</button></div></div>
+      <button id="save" class="btn" type="button">Save result .png</button>
+      <div id="status" class="muted" hidden></div>
+    </section>
+    <footer class="links">
+      <a href="https://github.com/Gaussifier/gaussifier-sr" target="_blank" rel="noopener">Code</a>
+      <a href="https://gaussifier.github.io/demo/" target="_blank" rel="noopener">Gaussifier demo</a>
+    </footer>
+  </aside>
+  <main id="stage">
+    <canvas id="view"></canvas>
+    <div id="labelLeft" class="side left" hidden>Bicubic</div>
+    <div id="labelRight" class="side right" hidden>Gaussifier-SR</div>
+    <div id="empty"><h2>Drop a low-resolution image here</h2></div>
+    <div id="live" hidden>running ×2</div>
+    <div id="hint">wheel zoom · drag pan · drag the divider · f fit · 1 actual size</div>
+  </main>
+</div>
+<script type="module" src="./src/main.ts"></script>
+</body>
+</html>

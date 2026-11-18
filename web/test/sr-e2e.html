@@ -1,0 +1,128 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Super-resolution gate</title>
+  <script type="importmap">
+  { "imports": {
+      "@gaussifier/wgsl": "/packages/wgsl/dist/index.js",
+      "@gaussifier/wasm-oversampler": "/packages/wasm-oversampler/dist/index.js",
+      "@gaussifier/inference": "/packages/inference/dist/index.js",
+      "onnxruntime-web/webgpu": "/node_modules/onnxruntime-web/dist/ort.webgpu.mjs",
+      "onnxruntime-web": "/node_modules/onnxruntime-web/dist/ort.webgpu.mjs"
+  } }
+  </script>
+</head>
+<body>
+<pre id="log"></pre>
+<script type="module">
+// The browser's upscale against the PyTorch reference (scripts/export_web_goldens.py): for every
+// case, PSNR against the HR image next to the reference's, the agreement with the reference,
+// the counts of every pass, and the median wall time of `runs` runs after a warmup.
+//   ?cases=kodim03_x2,kodim03_x4  ?runs=5  ?head=ort  ?pinned=1 (also run with the reference counts)
+import { createEngine } from "@gaussifier/inference";
+
+const params = new URLSearchParams(location.search);
+const root = "/fixtures/sr/";
+const runs = Number(params.get("runs") ?? 5);
+const log = (s) => { document.getElementById("log").textContent += s + "\n"; console.log(s); };
+const fetchOk = async (url) => { const r = await fetch(url); if (!r.ok) throw new Error(`missing ${url}`); return r; };
+const f32 = async (url) => new Float32Array(await (await fetchOk(url)).arrayBuffer());
+const json = async (url) => (await fetchOk(url)).json();
+
+/** An 8-bit PNG as planar [3, H, W] bytes, without colour management. */
+async function png(url) {
+  const bmp = await createImageBitmap(await (await fetchOk(url)).blob(), { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+  const ctx = new OffscreenCanvas(bmp.width, bmp.height).getContext("2d");
+  ctx.drawImage(bmp, 0, 0);
+  const { data } = ctx.getImageData(0, 0, bmp.width, bmp.height);
+  const hw = bmp.width * bmp.height, out = new Uint8Array(3 * hw);
+  for (let i = 0; i < hw; i++) for (let c = 0; c < 3; c++) out[c * hw + i] = data[4 * i + c];
+  return { data: out, width: bmp.width, height: bmp.height };
+}
+
+/** gaussifier_sr.metrics.quantize_8bit: round-half-even of clamp(x) * 255 in float32. */
+function q8(x) {
+  const v = Math.fround(Math.min(1, Math.max(0, x)) * 255);
+  const r = Math.round(v);
+  return r - v === 0.5 && r % 2 !== 0 ? r - 1 : r;
+}
+/** PSNR over the three channels of the 8-bit images. */
+function psnrRgb(a, b) {
+  let se = 0;
+  for (let i = 0; i < a.length; i++) { const d = q8(a[i]) - b[i]; se += d * d; }
+  return 10 * Math.log10((255 * 255) / (se / a.length));
+}
+/** gaussifier_sr.metrics.psnr_y: BT.601 luma of the 8-bit images, `shave` border pixels removed. */
+function psnrY(a, b, W, H, shave) {
+  const hw = W * H, y = (v, i) => 16 + 65.481 * v(i) + 128.553 * v(hw + i) + 24.966 * v(2 * hw + i);
+  const va = (i) => Math.fround(q8(a[i]) / 255), vb = (i) => Math.fround(b[i] / 255);
+  let se = 0, n = 0;
+  for (let r = shave; r < H - shave; r++) for (let c = shave; c < W - shave; c++) { const d = y(va, r * W + c) - y(vb, r * W + c); se += d * d; n++; }
+  return 10 * Math.log10((255 * 255) / (se / n));
+}
+const asBytes = (f) => Uint8Array.from(f, q8);
+const maxAbs = (a, b) => { let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; };
+const median = (v) => { const s = [...v].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+const r3 = (v) => +v.toFixed(3);
+
+window.__runTests = async () => {
+  const results = []; let passed = 0, failed = 0;
+  const check = (name, ok, detail) => { results.push({ name, ok, ...detail }); ok ? passed++ : failed++; log(`${ok ? "PASS" : "FAIL"} ${name} ${JSON.stringify(detail)}`); };
+  try {
+    const cases = params.get("cases")?.split(",") ?? (await json(root + "index.json")).cases;
+    const t0 = performance.now();
+    const engine = await createEngine({ bundleUrl: "/apps/demosr/public/models/", ortWasmPaths: "/node_modules/onnxruntime-web/dist/" });
+    log(`engine ready in ${(performance.now() - t0).toFixed(0)} ms on ${engine.adapter}; heads ${engine.headKinds}`);
+    const headBackend = params.get("head") ?? undefined;
+    const rows = [];
+    for (const name of cases) {
+      const dir = `${root}${name}/`;
+      const m = await json(dir + "manifest.json");
+      const w = engine.manifest.weights_sha256;
+      if (m.weights_sha256.stage1 !== w.stage1 || m.weights_sha256.head !== w.head) throw new Error("goldens and web bundle use different weights");
+      const lr = { data: await f32(dir + "lr.bin"), width: m.lr.width, height: m.lr.height };
+      const hr = await png(dir + "hr.png");
+      const ref = await f32(dir + "ref.bin"), ref32 = await f32(dir + "ref_fp32.bin");
+      const opts = { scale: m.scale, headBackend };
+      await engine.upscale(lr, opts); // warm this size
+      const times = []; let out;
+      for (let r = 0; r < runs; r++) { const t = performance.now(); out = await engine.upscale(lr, opts); times.push(performance.now() - t); }
+      const profiled = await engine.upscale(lr, { ...opts, profile: true });
+      const refScores = m.scores.ref;
+      const row = {
+        case: name, scale: m.scale, lr: `${m.lr.width}x${m.lr.height}`,
+        psnr_rgb: r3(psnrRgb(out.image, hr.data)), ref_psnr_rgb: r3(refScores.psnr_rgb),
+        psnr_y: r3(psnrY(out.image, hr.data, out.width, out.height, m.scale)), ref_psnr_y: r3(refScores.psnr_y),
+        vs_ref_psnr_rgb: r3(psnrRgb(out.image, asBytes(ref))), vs_ref_fp32_psnr_rgb: r3(psnrRgb(out.image, asBytes(ref32))),
+        ref_run_to_run_psnr_rgb: r3(Math.min(...m.scores.ref_run_vs_ref_psnr_rgb.filter((v) => Number.isFinite(v) && v < 200))),
+        max_abs_vs_ref: r3(maxAbs(out.image, ref)),
+        n: out.passes.map((p) => p.n), ref_n: m.passes.ref.map((p) => p.n), ref_fp32_n: m.passes.ref_fp32.map((p) => p.n),
+        own: r3(out.ownCount), ref_own: r3(m.own_count.ref),
+        wall_ms_median: r3(median(times)), wall_ms_all: times.map(r3), ref_torch_ms: r3(m.timing_ms.ref_median),
+        timings_ms: out.timings, profile_ms: profiled.timings,
+      };
+      row.delta_psnr_rgb = r3(row.psnr_rgb - row.ref_psnr_rgb);
+      row.delta_psnr_y = r3(row.psnr_y - row.ref_psnr_y);
+      if (params.get("pinned") === "1") {
+        const pinned = await engine.upscale(lr, { ...opts, counts: row.ref_n });
+        row.pinned_psnr_rgb = r3(psnrRgb(pinned.image, hr.data));
+        row.pinned_vs_ref_psnr_rgb = r3(psnrRgb(pinned.image, asBytes(ref)));
+      }
+      rows.push(row);
+      check(`${name}_within_0.05dB`, Math.abs(row.delta_psnr_rgb) <= 0.05, row);
+    }
+    const mean = (k) => r3(rows.reduce((s, r) => s + r[k], 0) / rows.length);
+    const meanAbs = (k) => r3(rows.reduce((s, r) => s + Math.abs(r[k]), 0) / rows.length);
+    check("mean_abs_delta_within_0.05dB", meanAbs("delta_psnr_rgb") <= 0.05, { mean_delta_psnr_rgb: mean("delta_psnr_rgb"), mean_abs_delta_psnr_rgb: meanAbs("delta_psnr_rgb"), mean_delta_psnr_y: mean("delta_psnr_y"), mean_abs_delta_psnr_y: meanAbs("delta_psnr_y") });
+    engine.dispose();
+    return { passed, failed, results, rows };
+  } catch (e) {
+    failed++; results.push({ name: "exception", ok: false, error: String(e), stack: String(e.stack).slice(0, 1500) }); log("EXC " + e + "\n" + e.stack);
+  }
+  return { passed, failed, results };
+};
+window.__testReady = true;
+</script>
+</body>
+</html>

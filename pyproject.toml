@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gaussifier-sr"
+version = "1.0.0"
+description = "Super-resolution inference with a feed-forward 2D Gaussian image decomposition."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=1.26,<3",
+    "Pillow>=10",
+    "ninja>=1.11",
+    "torch==2.12.*",
+]
+
+[project.optional-dependencies]
+# LPIPS, DISTS and FID for gaussifier_sr.evaluate / gaussifier_sr.metrics.
+metrics = ["torchvision==0.27.*", "lpips>=0.1.4", "scipy>=1.11"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+gaussifier-sr = "gaussifier_sr.infer:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gaussifier_sr"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130" }
+torchvision = { index = "pytorch-cu130" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    "src/gaussifier_sr/base",
+    "src/gaussifier_sr/third_party",
+    "web/packages/wasm-oversampler/tools",  # hashed into the prebuilt wasm's BUILD.json
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["gaussifier_sr"]
